@@ -72,20 +72,31 @@ SCI-Master/
 └── pyproject.toml       # 项目元数据和工具配置
 ```
 
-## 数据库模型示例
+## 数据库表说明
 
-文献数据模型应包含以下字段：
-- pmid: 主键，PubMed ID
-- title: 标题
-- abstract: 摘要
-- authors: 作者列表（JSON）
-- journal: 期刊名称
-- publication_date: 发表日期
-- keywords: 关键词（JSON）
-- doi: DOI 标识
-- citations_count: 引用次数
-- created_at: 创建时间
-- updated_at: 更新时间
+### 主表
+- **articles**: 文献主表，存储文献基本信息（DOI为主键）
+- **authors**: 作者信息表，存储作者姓名、ORCID等
+- **journals**: 期刊信息表，存储期刊名称、ISSN等
+- **affiliations**: 机构信息表，存储作者所属机构
+- **keywords**: 关键词表，存储文献关键词
+- **mesh_terms**: MeSH术语表，存储医学主题词
+- **mesh_qualifiers**: MeSH限定词表，存储MeSH术语的限定词
+- **chemicals**: 化学物质表，存储文献涉及的化学物质
+- **publication_types**: 文献类型表，如Review、Clinical Trial等
+- **grants**: 基金信息表，存储资助基金信息
+- **references**: 引用关系表，存储文献间的引用关系
+- **article_ids**: 其他ID表，存储文献的各种标识符
+
+### 关联表
+- **article_authors**: 文献-作者关联表（包含作者顺序、通讯作者标记）
+- **article_author_affiliations**: 文献-作者-机构三方关联表
+- **article_keywords**: 文献-关键词关联表
+- **article_mesh_terms**: 文献-MeSH术语关联表（包含是否主要主题）
+- **article_mesh_qualifiers**: 文献-MeSH限定词关联表
+- **article_chemicals**: 文献-化学物质关联表
+- **article_publication_types**: 文献-文献类型关联表
+- **article_grants**: 文献-基金关联表
 
 ## 环境变量配置
 

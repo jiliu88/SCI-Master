@@ -21,6 +21,14 @@ class Affiliation(Base):
         comment="完整机构信息"
     )
     
+    # 标准化后的名称（用于匹配）
+    normalized_name: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        index=True,
+        comment="标准化后的机构名称"
+    )
+    
     # 解析后的字段
     department: Mapped[Optional[str]] = mapped_column(
         String(300),
@@ -52,6 +60,12 @@ class Affiliation(Base):
         nullable=True,
         index=True,
         comment="国家"
+    )
+    
+    postal_code: Mapped[Optional[str]] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="邮政编码"
     )
     
     email: Mapped[Optional[str]] = mapped_column(
