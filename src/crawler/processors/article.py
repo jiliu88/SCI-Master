@@ -487,9 +487,12 @@ class ArticleProcessor:
         if 'pmc' in other_ids:
             article.pmc_id = other_ids['pmc']
         
-        # 保存所有其他 ID
+        # 需要跳过的 ID 类型（已经保存在 article 表中）
+        skip_types = {'pmc', 'pubmed', 'doi'}
+        
+        # 保存其他类型的 ID
         for id_type, id_value in other_ids.items():
-            if id_type and id_value:
+            if id_type and id_value and id_type not in skip_types:
                 # 检查是否已存在
                 existing = db.query(ArticleIds).filter(
                     ArticleIds.article_doi == article.doi,
