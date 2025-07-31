@@ -158,6 +158,7 @@ Thumbs.db
 /cache/
 *.db
 *.sqlite
+/crawl_results/
 
 # Alembic
 alembic/versions/*.pyc
