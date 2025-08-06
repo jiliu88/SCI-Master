@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import csv
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -77,6 +79,9 @@ class PubMedCrawler:
             # 2. 获取文献详情
             async with self.detail_fetcher as fetcher:
                 articles = await fetcher.fetch(pmid_list)
+            
+            # 2.5 处理缺失 DOI 的文献
+            articles = await self._handle_missing_dois(articles)
             
             stats['articles_fetched'] = len(articles)
             
@@ -498,6 +503,127 @@ class PubMedCrawler:
         await self._save_references(references_data)
         
         return len(references_data)
+    
+    async def _handle_missing_dois(self, articles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """处理缺失 DOI 的文献
+        
+        Args:
+            articles: 文献数据列表
+            
+        Returns:
+            处理后的文献列表
+        """
+        missing_doi_articles = []
+        articles_with_doi = []
+        
+        # 分离有 DOI 和无 DOI 的文献
+        for article in articles:
+            if article.get('doi'):
+                articles_with_doi.append(article)
+            else:
+                missing_doi_articles.append(article)
+        
+        if not missing_doi_articles:
+            self.logger.info("所有文献都有 DOI")
+            return articles
+        
+        self.logger.warning(f"发现 {len(missing_doi_articles)} 篇文献缺失 DOI，尝试重新获取")
+        
+        # 对缺失 DOI 的文献再次获取详细信息
+        updated_articles = []
+        still_missing_doi = []
+        
+        for article in missing_doi_articles:
+            pmid = article.get('pmid')
+            if not pmid:
+                still_missing_doi.append(article)
+                continue
+            
+            try:
+                # 使用 DetailFetcher 单独获取该文献
+                self.logger.info(f"重新获取 PMID {pmid} 的详细信息")
+                async with self.detail_fetcher as fetcher:
+                    result = await fetcher.fetch([pmid])
+                
+                if result and len(result) > 0:
+                    updated_article = result[0]
+                    if updated_article.get('doi'):
+                        self.logger.info(f"成功获取 PMID {pmid} 的 DOI: {updated_article['doi']}")
+                        updated_articles.append(updated_article)
+                    else:
+                        self.logger.warning(f"PMID {pmid} 仍然没有 DOI")
+                        still_missing_doi.append(updated_article)
+                else:
+                    still_missing_doi.append(article)
+            except Exception as e:
+                self.logger.error(f"重新获取 PMID {pmid} 失败: {str(e)}")
+                still_missing_doi.append(article)
+        
+        # 将仍然缺失 DOI 的文献记录到 CSV
+        if still_missing_doi:
+            await self._save_missing_doi_to_csv(still_missing_doi)
+        
+        # 合并所有有 DOI 的文献
+        all_articles = articles_with_doi + updated_articles
+        
+        self.logger.info(f"最终获得 {len(all_articles)} 篇有 DOI 的文献，{len(still_missing_doi)} 篇无 DOI")
+        
+        return all_articles
+    
+    async def _save_missing_doi_to_csv(self, articles: List[Dict[str, Any]]):
+        """将缺失 DOI 的文献保存到 CSV 文件
+        
+        Args:
+            articles: 缺失 DOI 的文献列表
+        """
+        # 创建输出目录
+        output_dir = Path("missing_doi_articles")
+        output_dir.mkdir(exist_ok=True)
+        
+        # 生成文件名（包含时间戳）
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_file = output_dir / f"missing_doi_{timestamp}.csv"
+        
+        # 写入 CSV
+        with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+            fieldnames = [
+                'pmid', 'pmc_id', 'title', 'journal', 'authors', 
+                'publication_date', 'abstract', 'keywords', 'mesh_terms'
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for article in articles:
+                # 提取作者列表
+                authors = []
+                for author in article.get('authors', []):
+                    if author.get('collective_name'):
+                        authors.append(author['collective_name'])
+                    else:
+                        name = f"{author.get('fore_name', '')} {author.get('last_name', '')}".strip()
+                        if name:
+                            authors.append(name)
+                
+                # 提取关键词
+                keywords = [kw.get('keyword', '') for kw in article.get('keywords', [])]
+                
+                # 提取 MeSH 术语
+                mesh_terms = [mt.get('descriptor_name', '') for mt in article.get('mesh_terms', [])]
+                
+                # 写入行
+                writer.writerow({
+                    'pmid': article.get('pmid', ''),
+                    'pmc_id': article.get('other_ids', {}).get('pmc', ''),
+                    'title': article.get('title', ''),
+                    'journal': article.get('journal', {}).get('title', ''),
+                    'authors': '; '.join(authors),
+                    'publication_date': str(article.get('journal', {}).get('pub_date', '')),
+                    'abstract': article.get('abstract', ''),
+                    'keywords': '; '.join(keywords),
+                    'mesh_terms': '; '.join(mesh_terms)
+                })
+        
+        self.logger.info(f"已将 {len(articles)} 篇缺失 DOI 的文献保存到: {csv_file}")
     
     async def _fetch_fulltext(self, articles: List[Dict[str, Any]]) -> int:
         """获取全文"""

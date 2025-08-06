@@ -111,8 +111,13 @@ class DetailFetcher(BaseFetcher):
             # 摘要
             abstract_text = self._extract_abstract(article.get('Abstract', {}))
             
-            # DOI
+            # 其他 ID（需要先提取，因为 DOI 可能在这里）
+            other_ids = self._extract_other_ids(article_data)
+            
+            # DOI - 优先从 ELocationID 获取，如果没有则从 other_ids 获取
             doi = extract_doi(article.get('ELocationID', []))
+            if not doi and 'doi' in other_ids:
+                doi = other_ids['doi']
             
             # 期刊信息
             journal_info = self._extract_journal_info(article.get('Journal', {}))
@@ -134,9 +139,6 @@ class DetailFetcher(BaseFetcher):
             
             # 基金信息
             grants = self._extract_grants(article.get('GrantList', []))
-            
-            # 其他 ID
-            other_ids = self._extract_other_ids(article_data)
             
             # 日期信息
             dates = self._extract_dates(medline_citation)
