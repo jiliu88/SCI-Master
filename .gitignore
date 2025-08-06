@@ -163,11 +163,6 @@ Thumbs.db
 # Alembic
 alembic/versions/*.pyc
 
-# Test files
-test_*.py
-*_test.py
-*.test
-
 # Temporary files
 *.tmp
 *.bak
