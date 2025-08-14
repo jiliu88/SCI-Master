@@ -35,7 +35,8 @@ class PubMedCrawler:
         max_results: Optional[int] = None,
         save_to_db: bool = True,
         fetch_references: bool = False,
-        fetch_fulltext: bool = False
+        fetch_fulltext: bool = False,
+        reference_depth: int = 1
     ) -> Dict[str, Any]:
         """
         通过关键词爬取文献
@@ -90,10 +91,22 @@ class PubMedCrawler:
                 saved_count = await self._save_articles(articles)
                 stats['articles_saved'] = saved_count
             
-            # 4. 获取引用关系
+            # 4. 获取引用关系并递归获取被引用文献
             if fetch_references:
-                references_count = await self._fetch_and_save_references(pmid_list)
-                stats['references_fetched'] = references_count
+                # 初始化已处理集合
+                processed_pmids = set(pmid_list)
+                with get_db() as db:
+                    existing = db.query(Article.pmid).all()
+                    processed_pmids.update([p[0] for p in existing if p[0]])
+                
+                ref_stats = await self._fetch_all_references_recursively(
+                    pmid_list,
+                    processed_pmids=processed_pmids,
+                    max_depth=reference_depth if reference_depth > 0 else None
+                )
+                stats['references_fetched'] = ref_stats.get('total_references', 0)
+                stats['nested_articles_fetched'] = ref_stats.get('total_articles', 0)
+                stats['levels_processed'] = ref_stats.get('levels_processed', 0)
             
             # 5. 获取全文
             if fetch_fulltext:
@@ -116,7 +129,9 @@ class PubMedCrawler:
         self,
         pmid_list: List[str],
         save_to_db: bool = True,
-        update_existing: bool = False
+        update_existing: bool = False,
+        fetch_references: bool = True,
+        max_depth: Optional[int] = None  # None 表示无限递归
     ) -> Dict[str, Any]:
         """
         爬取指定 PMID 列表的文献详情
@@ -125,6 +140,8 @@ class PubMedCrawler:
             pmid_list: PMID 列表
             save_to_db: 是否保存到数据库
             update_existing: 是否更新已存在的文献
+            fetch_references: 是否获取引用关系
+            max_depth: 最大递归深度（获取被引用文献的层级）
         
         Returns:
             爬取结果统计
@@ -163,6 +180,22 @@ class PubMedCrawler:
                     stats['updated'] = updated
                 else:
                     stats['saved'] = await self._save_articles(articles)
+            
+            # 获取引用关系并递归获取被引用文献
+            if fetch_references and save_to_db:
+                # 初始化已处理集合，包括数据库中已存在的文献
+                processed_pmids = set(pmid_list)
+                with get_db() as db:
+                    existing = db.query(Article.pmid).all()
+                    processed_pmids.update([p[0] for p in existing if p[0]])
+                
+                ref_stats = await self._fetch_all_references_recursively(
+                    pmid_list, 
+                    processed_pmids=processed_pmids,
+                    max_depth=max_depth
+                )
+                stats['references_fetched'] = ref_stats.get('total_references', 0)
+                stats['nested_articles_fetched'] = ref_stats.get('total_articles', 0)
             
         except Exception as e:
             self.logger.error(f"爬取文献详情出错: {str(e)}", exc_info=True)
@@ -370,6 +403,27 @@ class PubMedCrawler:
         """保存引用关系"""
         from src.models import ArticleReference
         
+        # 首先收集所有需要的 PMID
+        all_pmids = set()
+        for pmid, data in references_data.items():
+            if 'error' not in data:
+                # 收集被引用文献的 PMID
+                for ref in data.get('references', []):
+                    cited_pmid = ref.get('cited_pmid')
+                    if cited_pmid and not ref.get('exists_in_db'):
+                        all_pmids.add(cited_pmid)
+                
+                # 收集引用文献的 PMID
+                for cite in data.get('cited_by', []):
+                    citing_pmid = cite.get('citing_pmid')
+                    if citing_pmid and not cite.get('exists_in_db'):
+                        all_pmids.add(citing_pmid)
+        
+        # 批量获取缺失文献的详情并保存
+        if all_pmids:
+            self.logger.info(f"发现 {len(all_pmids)} 篇引用相关文献不在数据库中，尝试获取并保存")
+            await self._fetch_and_save_missing_articles(list(all_pmids))
+        
         with get_db() as db:
             saved_count = 0
             
@@ -394,12 +448,18 @@ class PubMedCrawler:
                         
                         # 查找被引用文献的 DOI
                         cited_article = db.query(Article).filter(Article.pmid == cited_pmid).first()
-                        cited_doi = cited_article.doi if cited_article else None
+                        
+                        if not cited_article:
+                            # 如果文献还不存在，跳过（应该在前面已经获取并保存了）
+                            self.logger.warning(f"被引用文献 PMID {cited_pmid} 未找到，跳过")
+                            continue
+                        
+                        cited_doi = cited_article.doi
                         
                         # 检查关系是否已存在
                         existing = db.query(ArticleReference).filter(
                             ArticleReference.citing_doi == citing_doi,
-                            ArticleReference.cited_pmid == cited_pmid
+                            ArticleReference.cited_doi == cited_doi
                         ).first()
                         
                         if not existing:
@@ -422,40 +482,26 @@ class PubMedCrawler:
                         # 查找引用文献的 DOI
                         citing_article_ref = db.query(Article).filter(Article.pmid == citing_pmid).first()
                         
-                        if citing_article_ref:
-                            # 检查关系是否已存在
-                            existing = db.query(ArticleReference).filter(
-                                ArticleReference.citing_doi == citing_article_ref.doi,
-                                ArticleReference.cited_doi == citing_doi
-                            ).first()
-                            
-                            if not existing:
-                                # 创建引用关系（反向）
-                                reference = ArticleReference(
-                                    citing_doi=citing_article_ref.doi,
-                                    cited_doi=citing_doi,
-                                    cited_pmid=pmid
-                                )
-                                db.add(reference)
-                                saved_count += 1
-                        else:
-                            # 如果引用文献不在数据库中，仅保存 PMID 关系
-                            existing = db.query(ArticleReference).filter(
-                                ArticleReference.citing_doi == None,
-                                ArticleReference.cited_doi == citing_doi,
-                                ArticleReference.cited_pmid == pmid
-                            ).first()
-                            
-                            if not existing:
-                                # 创建仅包含 PMID 的引用关系
-                                reference = ArticleReference(
-                                    citing_doi=None,  # 引用文献的 DOI 未知
-                                    cited_doi=citing_doi,
-                                    cited_pmid=pmid,
-                                    reference_string=f"PMID:{citing_pmid}"  # 保存原始 PMID 信息
-                                )
-                                db.add(reference)
-                                saved_count += 1
+                        if not citing_article_ref:
+                            # 如果文献还不存在，跳过（应该在前面已经获取并保存了）
+                            self.logger.warning(f"引用文献 PMID {citing_pmid} 未找到，跳过")
+                            continue
+                        
+                        # 检查关系是否已存在
+                        existing = db.query(ArticleReference).filter(
+                            ArticleReference.citing_doi == citing_article_ref.doi,
+                            ArticleReference.cited_doi == citing_doi
+                        ).first()
+                        
+                        if not existing:
+                            # 创建引用关系（反向）
+                            reference = ArticleReference(
+                                citing_doi=citing_article_ref.doi,
+                                cited_doi=citing_doi,
+                                cited_pmid=pmid
+                            )
+                            db.add(reference)
+                            saved_count += 1
                     
                     # 定期提交以避免内存过载
                     if saved_count % 100 == 0:
@@ -475,24 +521,149 @@ class PubMedCrawler:
                 self.logger.error(f"提交引用关系失败: {str(e)}", exc_info=True)
                 db.rollback()
     
-    async def _find_missing_referenced_articles(
-        self,
-        references_data: Dict[str, Dict[str, Any]]
-    ) -> List[str]:
-        """查找缺失的被引用文献"""
-        all_referenced_pmids = set()
+    async def _fetch_and_save_missing_articles(self, pmid_list: List[str]):
+        """获取并保存缺失的文献
         
-        for data in references_data.values():
-            if 'error' not in data:
-                for ref in data.get('references', []):
-                    if ref.get('cited_pmid') and not ref.get('exists_in_db'):
-                        all_referenced_pmids.add(ref['cited_pmid'])
+        Args:
+            pmid_list: 缺失文献的 PMID 列表
+        """
+        if not pmid_list:
+            return
+        
+        try:
+            # 分批处理，避免一次获取太多
+            batch_size = 50
+            for i in range(0, len(pmid_list), batch_size):
+                batch = pmid_list[i:i + batch_size]
+                self.logger.info(f"获取第 {i//batch_size + 1} 批缺失文献，共 {len(batch)} 篇")
                 
-                for cite in data.get('cited_by', []):
-                    if cite.get('citing_pmid') and not cite.get('exists_in_db'):
-                        all_referenced_pmids.add(cite['citing_pmid'])
+                # 获取文献详情
+                async with self.detail_fetcher as fetcher:
+                    articles = await fetcher.fetch(batch)
+                
+                # 处理缺失 DOI 的文献
+                articles = await self._handle_missing_dois(articles)
+                
+                # 保存到数据库
+                if articles:
+                    saved_count = await self._save_articles(articles)
+                    self.logger.info(f"成功保存 {saved_count} 篇引用相关文献")
+                
+                # 避免请求过快
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            self.logger.error(f"获取并保存缺失文献失败: {str(e)}", exc_info=True)
+    
+    async def _fetch_all_references_recursively(
+        self,
+        pmid_list: List[str],
+        processed_pmids: set,
+        max_depth: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        递归获取所有引用关系和被引用文献（可以无限递归）
         
-        return list(all_referenced_pmids)
+        Args:
+            pmid_list: PMID 列表
+            processed_pmids: 已处理的 PMID 集合（避免重复）
+            max_depth: 最大深度，None 表示无限
+        
+        Returns:
+            统计信息
+        """
+        stats = {
+            'total_references': 0,
+            'total_articles': 0,
+            'levels_processed': 0
+        }
+        
+        current_depth = 0
+        current_batch = pmid_list.copy()
+        
+        while current_batch:
+            # 检查深度限制
+            if max_depth is not None and current_depth >= max_depth:
+                self.logger.info(f"达到最大深度 {max_depth}，停止递归")
+                break
+            
+            self.logger.info(f"\n处理第 {current_depth + 1} 层，包含 {len(current_batch)} 篇文献")
+            
+            # 获取当前批次的引用关系
+            all_references_data = {}
+            batch_size = 50  # 分批处理，避免一次请求太多
+            
+            for i in range(0, len(current_batch), batch_size):
+                batch = current_batch[i:i + batch_size]
+                self.logger.info(f"  获取第 {i//batch_size + 1} 批引用关系（{len(batch)} 篇）")
+                
+                async with self.references_fetcher as fetcher:
+                    references_data = await fetcher.fetch(batch, fetch_types=['refs'])
+                    all_references_data.update(references_data)
+                
+                # 避免请求过快
+                await asyncio.sleep(0.5)
+            
+            # 收集所有新的被引用 PMID
+            new_pmids = set()
+            for pmid, data in all_references_data.items():
+                if 'error' not in data:
+                    for ref in data.get('references', []):
+                        cited_pmid = ref.get('cited_pmid')
+                        if cited_pmid and cited_pmid not in processed_pmids:
+                            new_pmids.add(cited_pmid)
+            
+            if new_pmids:
+                self.logger.info(f"  发现 {len(new_pmids)} 篇新文献需要获取")
+                
+                # 分批获取新文献的详细信息
+                all_new_articles = []
+                for i in range(0, len(new_pmids), batch_size):
+                    batch = list(new_pmids)[i:i + batch_size]
+                    self.logger.info(f"    获取第 {i//batch_size + 1} 批文献详情（{len(batch)} 篇）")
+                    
+                    async with self.detail_fetcher as fetcher:
+                        articles = await fetcher.fetch(batch)
+                    
+                    # 处理缺失 DOI 的文献
+                    articles = await self._handle_missing_dois(articles)
+                    all_new_articles.extend(articles)
+                    
+                    # 避免请求过快
+                    await asyncio.sleep(0.5)
+                
+                # 保存所有新文献
+                if all_new_articles:
+                    saved_count = await self._save_articles(all_new_articles)
+                    stats['total_articles'] += saved_count
+                    self.logger.info(f"  保存了 {saved_count} 篇新文献")
+                
+                # 将新 PMID 添加到已处理集合
+                processed_pmids.update(new_pmids)
+                
+                # 准备下一批次
+                current_batch = list(new_pmids)
+            else:
+                self.logger.info("  没有发现新的引用文献")
+                current_batch = []  # 没有新文献，结束递归
+            
+            # 保存引用关系
+            if all_references_data:
+                await self._save_references(all_references_data)
+                stats['total_references'] += sum(
+                    len(data.get('references', [])) 
+                    for data in all_references_data.values() 
+                    if 'error' not in data
+                )
+            
+            current_depth += 1
+            stats['levels_processed'] = current_depth
+            
+            # 显示进度
+            self.logger.info(f"  当前总计: {len(processed_pmids)} 篇文献已处理")
+        
+        self.logger.info(f"\n递归完成！共处理 {stats['levels_processed']} 层")
+        return stats
     
     async def _fetch_and_save_references(self, pmid_list: List[str]) -> int:
         """获取并保存引用关系"""

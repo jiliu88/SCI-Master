@@ -57,7 +57,8 @@ class KeywordCrawler:
         save_to_db: bool = True,
         fetch_references: bool = False,
         fetch_fulltext: bool = False,
-        resume: bool = True
+        resume: bool = True,
+        force: bool = False  # 强制重新爬取
     ) -> Dict[str, Any]:
         """
         批量爬取关键词
@@ -77,15 +78,22 @@ class KeywordCrawler:
         start_time = datetime.now()
         
         # 加载进度
-        progress = self._load_progress() if resume else {}
-        completed_keywords = set(progress.get('completed', []))
-        
-        # 过滤已完成的关键词
-        pending_keywords = [k for k in keywords if k not in completed_keywords]
-        
-        if not pending_keywords:
-            self.logger.info("所有关键词已完成爬取")
-            return self._load_stats()
+        if force:
+            # 强制重新爬取，清空进度
+            self.logger.info("强制重新爬取模式，忽略之前的进度")
+            progress = {}
+            completed_keywords = set()
+            pending_keywords = keywords
+        else:
+            progress = self._load_progress() if resume else {}
+            completed_keywords = set(progress.get('completed', []))
+            
+            # 过滤已完成的关键词
+            pending_keywords = [k for k in keywords if k not in completed_keywords]
+            
+            if not pending_keywords:
+                self.logger.info("所有关键词已完成爬取（使用 --force 强制重新爬取）")
+                return self._load_stats()
         
         self.logger.info(f"待爬取关键词数: {len(pending_keywords)}")
         
@@ -418,6 +426,11 @@ async def main():
         action='store_true',
         help='不从上次中断处继续'
     )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='强制重新爬取（忽略已完成的关键词）'
+    )
     
     args = parser.parse_args()
     
@@ -461,7 +474,8 @@ async def main():
             save_to_db=not args.no_save,
             fetch_references=args.fetch_references,
             fetch_fulltext=args.fetch_fulltext,
-            resume=not args.no_resume
+            resume=not args.no_resume,
+            force=args.force  # 传递强制重新爬取参数
         )
         
         # 打印汇总
