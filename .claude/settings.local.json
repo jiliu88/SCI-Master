@@ -8,7 +8,8 @@
       "Bash(grep:*)",
       "Bash(ls:*)",
       "Bash(cat:*)",
-      "Bash(psql:*)"
+      "Bash(psql:*)",
+      "WebSearch"
     ],
     "deny": []
   }
